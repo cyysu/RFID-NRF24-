@@ -1,0 +1,416 @@
+C51 COMPILER V9.52.0.0   MAIN                                                              11/14/2014 15:52:36 PAGE 1   
+
+
+C51 COMPILER V9.52.0.0, COMPILATION OF MODULE MAIN
+OBJECT MODULE PLACED IN .\Object\main.obj
+COMPILER INVOKED BY: C:\Keil\C51\BIN\C51.EXE main.c OPTIMIZE(2,SPEED) BROWSE INCDIR(hal\nrf24le1;hal\nrf24l01p;hal;compi
+                    -ler\c51;compiler\common) DEFINE(MCU_NRF24LE1) DEBUG OBJECTEXTEND PRINT(.\List\main.lst) TABS(2) OBJECT(.\Object\main.obj
+                    -)
+
+line level    source
+
+   1          /****************************************Copyright (c)****************************************************
+   2          **                                        
+   3          **                                 
+   4          **
+   5          **--------------File Info---------------------------------------------------------------------------------
+   6          ** File name:     main.c
+   7          ** Last modified Date:          
+   8          ** Last Version:    1.1
+   9          ** Descriptions:    
+  10          **            
+  11          **--------------------------------------------------------------------------------------------------------
+  12          ** Created by:      FiYu
+  13          ** Created date:    2014-11-12
+  14          ** Version:         1.1
+  15          ** Descriptions:    READER实验程序
+  16          **            
+  17          **                      RF配置
+  18          **                      模式：接收设备
+  19          **                      信道：50
+  20          **                      通道：PIPE0
+  21          **                      速率：250kbps
+  22          **                      功率：0dbm
+  23          **                      CRC： 16位
+  24          **                      地址：5字节，TX_ADDRESS
+  25          **                      自动应答：关闭
+  26          ** 串口波特率：57600
+  27          **  
+  28          **  
+  29          **--------------------------------------------------------------------------------------------------------
+  30          ** Modified by:     
+  31          ** Modified date:   
+  32          ** Version:       
+  33          ** Descriptions:    
+  34          **
+  35          ** Rechecked by:      
+  36          **********************************************************************************************************
+             -/
+  37          #include <reg24le1.h>
+  38          #include <stdint.h>
+  39          #include "hal_nrf.h"
+  40          #include "hal_nrf_hw.h"
+  41          #include "hal_uart.h"
+  42          #include "hal_clk.h"
+  43          #include "hal_delay.h"
+  44          #include "config.h"
+  45          #include "hal_wdog.h"
+  46          
+  47          
+  48          /*******************************************************************************************************
+  49           * 变量定义
+  50           *******************************************************************************************************/
+  51          xdata uint8_t RxPayload[32];
+  52          xdata uint8_t AckPayLoad[32];
+C51 COMPILER V9.52.0.0   MAIN                                                              11/14/2014 15:52:36 PAGE 2   
+
+  53          uint8_t  RF_Recv_Flag;
+  54          uint16_t PipeAndLen;
+  55          xdata uint8_t  RX_ADDRESS[5]  = {0xE7,0xE7,0xE7,0xE7,0xE7}; // RX address 
+  56          
+  57          xdata ReaderInformation ReaderInfo;
+  58          
+  59          xdata bool  RepFlag = false;
+  60          xdata uint8_t dest_addr;
+  61          xdata uint8_t UARTSendbuf[MAX_REP_IDNUM*5+10];
+  62          xdata uint8_t ID_Buf[MAX_TAG_BUFNUM][5];
+  63          xdata uint8_t ID_BufTmp[6];// CMD IDH IDL VH VL
+  64          
+  65          /******** ID_Buf数据格式  ******************
+  66          字节    1      2     3    4   5  
+  67                计时器  IDH   IDL  VH  VL
+  68          *******************************************/
+  69          xdata uint8_t TimeCount=0;
+  70          xdata uint8_t SecondFlag = 0;
+  71          xdata uint8_t UartSN = 0;
+  72          /*******************************************************************************************************
+  73           * Function DEFINITIONS
+  74           *******************************************************************************************************/
+  75          void DataInBuffer(uint8_t dat);
+  76          uint8_t Calculate_Fcs(uint8_t *buf);
+  77          
+  78          
+  79          
+  80          /*******************************************************************************************************
+  81           * 描  述 : 初始化IO
+  82           * 入  参 : 无
+  83           * 返回值 : 无
+  84           *******************************************************************************************************/ 
+  85          void IoInit(void)
+  86          {
+  87   1        P0DIR = 0xF6;
+  88   1        P1DIR = 0xFF;    
+  89   1      }
+  90          /*******************************************************************************************************
+  91           * 描  述 : Timer0初始化
+  92           * 入  参 : 无
+  93           * 返回值 : 无
+  94           *******************************************************************************************************/ 
+  95          void Timer0Init(void)
+  96          {
+  97   1        TMOD = 0x01;                       //16位定时器
+  98   1        TH0  = (65536-TIMER0_VALUE)/256;   //写入初值
+  99   1        TL0  = (65536-TIMER0_VALUE)%256;
+ 100   1        ET0  = 1;    //使能Timer0溢出中断
+ 101   1        TR0  = 1;    //启动Timer0
+ 102   1      }
+ 103          
+ 104          /*******************************************************************************************************
+ 105           * 描  述 : 初始化时钟
+ 106           * 入  参 : 无
+ 107           * 返回值 : 无
+ 108           *******************************************************************************************************/ 
+ 109          void ClockInit(void)
+ 110          {  
+ 111   1        hal_clk_set_16m_source(HAL_CLK_XOSC16M);   //使用外部16MHz晶振     
+ 112   1      }
+ 113          
+ 114          /*******************************************************************************************************
+C51 COMPILER V9.52.0.0   MAIN                                                              11/14/2014 15:52:36 PAGE 3   
+
+ 115           * 描  述 : 配置无线参数
+ 116           * 入  参 : 无
+ 117           * 返回值 : 无
+ 118           *******************************************************************************************************/ 
+ 119          void RfCofig(void)
+ 120          {
+ 121   1        RFCKEN = 1;      //使能RF时钟
+ 122   1      
+ 123   1        
+ 124   1        hal_nrf_close_pipe(HAL_NRF_ALL);          //先关闭所有的通道
+ 125   1        hal_nrf_open_pipe(HAL_NRF_PIPE0,false);   //再打开通道0.  
+ 126   1        
+ 127   1        hal_nrf_set_operation_mode(HAL_NRF_PRX);  // 模式：接收机
+ 128   1        hal_nrf_set_rf_channel(READER_CH);        // RF信道：50。接收和发送必须处于同一信道
+ 129   1        hal_nrf_set_datarate(HAL_NRF_250KBPS);    // RF速率：250KBPS
+ 130   1        hal_nrf_set_output_power(HAL_NRF_0DBM);   // 功率：0DBM
+ 131   1        hal_nrf_set_crc_mode(HAL_NRF_CRC_16BIT);       //设置CRC校验：16位CRC。必须和发送设备一致。
+ 132   1        hal_nrf_set_address(HAL_NRF_PIPE0,RX_ADDRESS); //设置接收机地址 
+ 133   1        hal_nrf_set_rx_payload_width(HAL_NRF_PIPE0, RX_PAYLOAD_LEN); // 接收模式下需要设置数据长度
+ 134   1        hal_nrf_set_power_mode(HAL_NRF_PWR_UP);     //接收机上电 
+ 135   1        
+ 136   1        RF = 1;       //使能无线中断
+ 137   1        EA = 1;      // 使能全局中断
+ 138   1        
+ 139   1        CE_HIGH(); // 使能接收
+ 140   1      }
+ 141          /*******************************************************************************************************
+ 142           * 描  述 : 标签ID入缓存
+ 143           * 入  参 : 无
+ 144           * 返回值 : 无
+ 145           *******************************************************************************************************/ 
+ 146          void ID_Inbuf(void)
+ 147          {
+ 148   1        uint8_t i,idx;
+ 149   1        xdata uint8_t iswrite,lastcnt = 0,row = 0;
+ 150   1        
+ 151   1        idx = 0xFF;
+ 152   1      
+ 153   1        if(ID_BufTmp[0] == CMD_TAG_REPID)
+ 154   1        {
+ 155   2          iswrite = true;
+ 156   2          
+ 157   2          for(i=0;i<MAX_TAG_BUFNUM;i++)
+ 158   2          {
+ 159   3            if(ID_Buf[i][0] != 0)
+ 160   3            {
+ 161   4              if((ID_Buf[i][1] == ID_BufTmp[1]) && (ID_Buf[i][2] == ID_BufTmp[2]))//标签ID存在
+ 162   4              {
+ 163   5                if(ID_Buf[i][0] < ID_OVERTIME)  //未超过20秒收到相同的标签号不上报
+ 164   5                {
+ 165   6                  iswrite = false;
+ 166   6                  break;
+ 167   6                }
+ 168   5                else 
+ 169   5                {
+ 170   6                  ID_Buf[i][0] = TAG_NEED_REP;
+ 171   6                  iswrite = false;
+ 172   6                  break;
+ 173   6                }
+ 174   5              }
+ 175   4              else
+ 176   4              {
+C51 COMPILER V9.52.0.0   MAIN                                                              11/14/2014 15:52:36 PAGE 4   
+
+ 177   5                if(ID_Buf[i][0]>lastcnt)
+ 178   5                {
+ 179   6                  lastcnt = ID_Buf[i][0];
+ 180   6                  row = i;
+ 181   6                }
+ 182   5              }
+ 183   4            }
+ 184   3            else
+ 185   3            {
+ 186   4              if(idx == 0xFF)idx = i;
+ 187   4            }
+ 188   3          }
+ 189   2          if(iswrite == true) //ID需要写入缓存
+ 190   2          {
+ 191   3            if(idx < MAX_TAG_BUFNUM)
+ 192   3            {
+ 193   4              for(i=0;i<(RX_PAYLOAD_LEN-2);i++)ID_Buf[idx][i+1] = ID_BufTmp[i+1];
+ 194   4              ID_Buf[idx][0] = TAG_NEED_REP;
+ 195   4            }
+ 196   3            else 
+ 197   3            {
+ 198   4              if(row < MAX_TAG_BUFNUM)
+ 199   4              {
+ 200   5                for(i=0;i<(RX_PAYLOAD_LEN-2);i++)ID_Buf[row][i+1] = ID_BufTmp[i+1];
+ 201   5                ID_Buf[row][0] = TAG_NEED_REP;
+ 202   5              }
+ 203   4            }
+ 204   3          } 
+ 205   2        }
+ 206   1      }
+ 207          
+ 208          /*******************************************************************************************************
+ 209           * 描  述 : UART上报数据打包
+ 210           * 入  参 : 无
+ 211           * 返回值 : 无
+ 212           *******************************************************************************************************/ 
+ 213          void Uart_PackAndRepDat(void)
+ 214          {
+ 215   1        xdata uint8_t i,tagnum = 0,fcs;
+ 216   1        
+ 217   1        RepFlag = false;
+ 218   1      
+ 219   1        for(i=0;i<MAX_TAG_BUFNUM;i++)
+ 220   1        {
+ 221   2          if(ID_Buf[i][0] > 1)
+ 222   2          {
+ 223   3            ID_Buf[i][0]++;
+ 224   3            if(ID_Buf[i][0] >= ID_OVERTIME)ID_Buf[i][0] = 0;
+ 225   3          }
+ 226   2        }
+ 227   1        
+ 228   1        UARTSendbuf[0] = FRAME_FIR_HEAD; //帧头
+ 229   1        UARTSendbuf[1] = FRAME_SEC_HEAD;
+ 230   1        UARTSendbuf[2] = DEST_ADDR;     // DA
+ 231   1        UARTSendbuf[3] = READER_ADDR;   // SA 
+ 232   1        
+ 233   1        for(i=0;i<MAX_TAG_BUFNUM;i++)
+ 234   1        {
+ 235   2          if(ID_Buf[i][0] == TAG_NEED_REP)
+ 236   2          {
+ 237   3            UARTSendbuf[4*tagnum + 8]  = ID_Buf[i][1];
+ 238   3            UARTSendbuf[4*tagnum + 9]  = ID_Buf[i][2];
+C51 COMPILER V9.52.0.0   MAIN                                                              11/14/2014 15:52:36 PAGE 5   
+
+ 239   3            UARTSendbuf[4*tagnum + 10]  = ID_Buf[i][3];
+ 240   3            UARTSendbuf[4*tagnum + 11] = ID_Buf[i][4];
+ 241   3            ID_Buf[i][0] = 2;
+ 242   3            tagnum++;
+ 243   3            RepFlag = true;
+ 244   3            if(tagnum == MAX_REP_IDNUM)break;
+ 245   3          } 
+ 246   2        }
+ 247   1        UartSN++;
+ 248   1        if(UartSN == 0xFF)UartSN = 1;
+ 249   1        UARTSendbuf[4] = tagnum*4+6;      // 长度
+ 250   1        UARTSendbuf[5] = UartSN;          // 流水号   
+ 251   1        UARTSendbuf[6] = REP_ID_INFO;     // 命令
+ 252   1        UARTSendbuf[7] = tagnum;          // TAG数量
+ 253   1           
+ 254   1        fcs = 0;
+ 255   1        for(i=0;i<UARTSendbuf[4];i++)fcs = fcs + UARTSendbuf[i+2];
+ 256   1        UARTSendbuf[UARTSendbuf[4] + 2] = (256 - fcs)%256;
+ 257   1        for(i=0;i<(UARTSendbuf[4] + 3);i++)  hal_uart_putchar(UARTSendbuf[i]);
+ 258   1      }
+ 259          /*******************************************************************************************************
+ 260           * 描  述 : 主函数
+ 261           * 入  参 : 无
+ 262           * 返回值 : 无
+ 263           *******************************************************************************************************/
+ 264          void main()
+ 265          {
+ 266   1        uint8_t i;
+ 267   1      
+ 268   1        IoInit(); 
+ 269   1        
+ 270   1        ClockInit();            
+ 271   1        RfCofig();  
+ 272   1      
+ 273   1        hal_uart_init(UART_BAUD_57K6);  //初始化UART，波特率57600
+ 274   1      
+ 275   1        while(hal_clk_get_16m_source() != HAL_CLK_XOSC16M) //等待时钟稳定
+ 276   1          ;
+ 277   1        Timer0Init();
+ 278   1      
+ 279   1        for(i=0;i<MAX_TAG_BUFNUM;i++)ID_Buf[i][0] = 0;     
+ 280   1        #ifdef  USE_WDT
+                hal_wdog_init(WDT_TIME);
+                #endif
+ 283   1      
+ 284   1        
+ 285   1        while(1)
+ 286   1        {    
+ 287   2          #ifdef  USE_WDT
+                  hal_wdog_restart();
+                  #endif    
+ 290   2          
+ 291   2          if(RF_Recv_Flag == true)//接收到Tag信息
+ 292   2          {
+ 293   3            #ifdef DEBUG_LED
+ 294   3            D4 = ~D4;
+ 295   3            #endif
+ 296   3            
+ 297   3            RF_Recv_Flag = false;//接收有效标志清零
+ 298   3            ID_Inbuf();          //ID信息写入缓存
+ 299   3          }
+ 300   2          
+C51 COMPILER V9.52.0.0   MAIN                                                              11/14/2014 15:52:36 PAGE 6   
+
+ 301   2          if(SecondFlag == true)//1秒定时时间到
+ 302   2          {
+ 303   3            SecondFlag = false; //清零秒定时标志    
+ 304   3            Uart_PackAndRepDat();//串口上报数据
+ 305   3          }
+ 306   2        }
+ 307   1      }
+ 308          /*******************************************************************************************************
+ 309           * 描  述 : UART上报数据打包
+ 310           * 入  参 : 无
+ 311           * 返回值 : 无
+ 312           *******************************************************************************************************/
+ 313          void rf_irq() interrupt INTERRUPT_RFIRQ
+ 314          {
+ 315   1        uint8_t irq_flags,i;
+ 316   1      
+ 317   1        irq_flags = hal_nrf_get_clear_irq_flags(); //读取并清除中断标志
+ 318   1        
+ 319   1        if(irq_flags & (1<<HAL_NRF_RX_DR))//接收中断
+ 320   1        {
+ 321   2          while(!hal_nrf_rx_fifo_empty())
+ 322   2          {
+ 323   3            PipeAndLen = hal_nrf_read_rx_payload(RxPayload);
+ 324   3      
+ 325   3            if((PipeAndLen&0xFF) == RX_PAYLOAD_LEN)  //检查长度是否为6
+ 326   3            {
+ 327   4              if(((RxPayload[0]+RxPayload[1]+RxPayload[2]+RxPayload[3]+RxPayload[4]+RxPayload[5])%256) == 0x00)//校
+             -验正确
+ 328   4              {
+ 329   5                for(i=0;i<(RX_PAYLOAD_LEN-1);i++)ID_BufTmp[i] = RxPayload[i];   
+ 330   5                RF_Recv_Flag = true;
+ 331   5              }
+ 332   4            }
+ 333   3            hal_nrf_flush_rx();
+ 334   3          }
+ 335   2        }
+ 336   1        if(irq_flags & ((1<<HAL_NRF_TX_DS)))         // transimmter finish 
+ 337   1        {
+ 338   2          hal_nrf_flush_tx();     
+ 339   2        }
+ 340   1      
+ 341   1        if(irq_flags & ((1<<HAL_NRF_MAX_RT)))        // re-transimmter
+ 342   1        {
+ 343   2          hal_nrf_flush_tx();
+ 344   2        }
+ 345   1      }
+ 346          /*******************************************************************************************************
+ 347           * 描  述 : 计算累加和校核
+ 348           * 入  参 : 待校验的数组地址
+ 349           * 返回值 : 校验结果
+ 350           *******************************************************************************************************/
+ 351          uint8_t Calculate_Fcs(uint8_t *buf)
+ 352          {
+ 353   1        xdata uint8_t i,fcs;
+ 354   1        fcs = 0;
+ 355   1        for(i=0;i<6;i++)fcs  = fcs + *(buf+i);
+ 356   1        return (256 - fcs);
+ 357   1      }
+ 358          /*******************************************************************************************************
+ 359           * 描  述 : Timer0中断服务函数
+ 360           * 入  参 : 无
+ 361           * 返回值 : 无
+C51 COMPILER V9.52.0.0   MAIN                                                              11/14/2014 15:52:36 PAGE 7   
+
+ 362           *******************************************************************************************************/
+ 363          void Timer0_irq() interrupt INTERRUPT_T0
+ 364          {
+ 365   1        
+ 366   1        TH0=(65536-TIMER0_VALUE)/256;
+ 367   1        TL0=(65536-TIMER0_VALUE)%256;
+ 368   1        TimeCount++;
+ 369   1        
+ 370   1        if(TimeCount == 50) //1000ms 
+ 371   1        {
+ 372   2          TimeCount=0;
+ 373   2          SecondFlag = true;
+ 374   2        }
+ 375   1      }
+ 376          /*********************************END FILE****************************************************************
+             -/                                
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   1675    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =    499       8
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =      3       8
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

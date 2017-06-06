@@ -1,0 +1,309 @@
+C51 COMPILER V9.52.0.0   MAIN                                                              12/08/2014 15:15:33 PAGE 1   
+
+
+C51 COMPILER V9.52.0.0, COMPILATION OF MODULE MAIN
+OBJECT MODULE PLACED IN .\Object\main.obj
+COMPILER INVOKED BY: C:\Keil\C51\BIN\C51.EXE main.c OPTIMIZE(4,SPEED) BROWSE INCDIR(hal\nrf24le1;hal\nrf24l01p;hal;compi
+                    -ler\c51;compiler\common) DEFINE(MCU_NRF24LE1) DEBUG OBJECTEXTEND PRINT(.\List\main.lst) TABS(2) OBJECT(.\Object\main.obj
+                    -)
+
+line level    source
+
+   1          /****************************************Copyright (c)****************************************************
+   2          **                                        
+   3          **                                 
+   4          **
+   5          **--------------File Info---------------------------------------------------------------------------------
+   6          ** File name:     main.c
+   7          ** Last modified Date:          
+   8          ** Last Version:    1.1
+   9          ** Descriptions:    
+  10          **            
+  11          **--------------------------------------------------------------------------------------------------------
+  12          ** Created by:      FiYu
+  13          ** Created date:    2014-11-12
+  14          ** Version:         1.0
+  15          ** Descriptions:    有源RFID实验程序-TAG
+  16          **                  发送数据格式 
+  17          **                  长度：6个字节    
+  18          **                  ID长度：2字节
+  19          字节:    1     2   3    4  5   6
+  20          意义:   命令  IDH IDL  VH  VL  校验
+  21          
+  22          **--------------------------------------------------------------------------------------------------------
+  23          ** Modified by:     
+  24          ** Modified date:   
+  25          ** Version:       
+  26          ** Descriptions:    
+  27          **
+  28          ** Rechecked by:      
+  29          **********************************************************************************************************
+             -/
+  30          #include <reg24le1.h>
+  31          #include <stdint.h>
+  32          #include <stdbool.h>
+  33          #include "config.h"
+  34          #include "hal_nrf.h"
+  35          #include "hal_nrf_hw.h"
+  36          #include "hal_clk.h"
+  37          #include "hal_rtc.h"
+  38          #include "hal_delay.h"  
+  39          #include "hal_adc.h"
+  40          #include "hal_wdog.h"
+  41          
+  42          /*-------------------管脚定义--------------------------------------------------*/
+  43          #define  D4    P00  // 开发板上的指示灯D4
+  44          #define  D5    P01  // 开发板上的指示灯D5
+  45          #define  S2    P12  // 开发板上的按键S2
+  46          #define  S3    P13  // 开发板上的按键S3
+  47          #define  ADC   P06
+  48          
+  49          /* 开发板中nRF24LE1管脚配置
+  50          P00：输出，驱动D4          P12：输入，按键检测S2  
+  51          P01：输出，驱动D5          P13：输入，按键检测S3
+  52          P02：输出                  P14：输出
+C51 COMPILER V9.52.0.0   MAIN                                                              12/08/2014 15:15:33 PAGE 2   
+
+  53          P03：输出，UART TXD        P15：输出
+  54          P04：输入，UART RXD        P16：输出
+  55          P06：输入，AIN6  AD检测
+  56          */
+  57          
+  58          /*******************************************************************************************************
+  59           * 变量定义
+  60           *******************************************************************************************************/
+  61          xdata bool  radio_busy;
+  62          xdata uint8_t  TxPayload[32];
+  63          xdata uint8_t  RxPayload[32];
+  64          uint16_t PipeAndLen;
+  65          uint8_t  TX_ADDRESS[5]  = {0xE7,0xE7,0xE7,0xE7,0xE7}; // TX address  
+  66          
+  67          xdata TagInformation TagInfo;
+  68          
+  69          
+  70          /*******************************************************************************************************
+  71           * 描  述 : 初始化IO
+  72           * 入  参 : 无
+  73           * 返回值 : 无
+  74           *******************************************************************************************************/ 
+  75          void IoInit(void)
+  76          {
+  77   1        P0DIR = 0x00;
+  78   1        P1DIR = 0x00;     
+  79   1      }
+  80          
+  81          /*********************************************************************************************************
+  82          ** 描  述:  adc初始化                             
+  83          ** 入  参:  NONE    
+  84          ** 返回值:  NONE                                                              
+  85          *********************************************************************************************************/
+  86          void adc_init(void)
+  87          {
+  88   1        hal_adc_set_input_channel(HAL_INP_VDD1_3);          //设置通道 检测1/3 VDD电压                  
+  89   1        hal_adc_set_reference(HAL_ADC_REF_INT);             //设置参考电压 内部1.22V                  
+  90   1        hal_adc_set_input_mode(HAL_ADC_SINGLE);             //单端输入                
+  91   1        hal_adc_set_conversion_mode(HAL_ADC_SINGLE_STEP);   //单次采样模式 
+  92   1        hal_adc_set_sampling_rate(HAL_ADC_2KSPS);           //采样速率为  2ksps
+  93   1        hal_adc_set_resolution(HAL_ADC_RES_12BIT);          //12位ADC                     
+  94   1        hal_adc_set_data_just(HAL_ADC_JUST_RIGHT);          //数据右对齐
+  95   1      }
+  96          
+  97          /*******************************************************************************************************
+  98           * 描  述 : 设置休眠时间
+  99           * 入  参 : period:休眠时间
+ 100           * 返回值 : 无
+ 101           *******************************************************************************************************/
+ 102          void set_timer_period(uint16_t period)
+ 103          {
+ 104   1        if((period<10) && (period>65536))period = 32768;
+ 105   1        
+ 106   1        hal_rtc_start(false);                             
+ 107   1        hal_rtc_start(true);                               
+ 108   1        hal_rtc_set_compare_value(period - 1);
+ 109   1      }
+ 110          
+ 111          /*******************************************************************************************************
+ 112           * 描  述 : 配置无线参数
+ 113           * 入  参 : 无
+ 114           * 返回值 : 无
+C51 COMPILER V9.52.0.0   MAIN                                                              12/08/2014 15:15:33 PAGE 3   
+
+ 115           *******************************************************************************************************/
+ 116          void RfCofig(void)
+ 117          {
+ 118   1        RFCKEN = 1;      //使能RF时钟
+ 119   1        
+ 120   1        hal_nrf_close_pipe(HAL_NRF_ALL);           //先关闭所有的通道.
+ 121   1        hal_nrf_open_pipe(HAL_NRF_PIPE0,false);    //再打开通道0.
+ 122   1      
+ 123   1        hal_nrf_set_operation_mode(HAL_NRF_PTX);    // 模式：发送
+ 124   1        hal_nrf_set_rf_channel(TAG_CH);             // RF信道：50。接收和发送必须处于同一信道
+ 125   1        hal_nrf_set_datarate(HAL_NRF_250KBPS);      // RF速率：250KBPS
+ 126   1        hal_nrf_set_output_power(HAL_NRF_0DBM);     // 功率：0DBM
+ 127   1        hal_nrf_set_crc_mode(HAL_NRF_CRC_16BIT);    //设置CRC校验：16位CRC。必须和接收设备一致。
+ 128   1        hal_nrf_set_address(HAL_NRF_TX,TX_ADDRESS);  //设置发射机地址
+ 129   1        hal_nrf_set_auto_retr(0,1500);                  //自动重发:0 
+ 130   1         
+ 131   1        hal_nrf_set_power_mode(HAL_NRF_PWR_UP);         //发射机上电
+ 132   1        RF = 1;       //使能无线中断
+ 133   1        EA = 1;      // 使能全局中断
+ 134   1      }
+ 135          
+ 136          /*******************************************************************************************************
+ 137           * 描  述 : 时钟和RTC唤醒配置
+ 138           * 入  参 : 无
+ 139           * 返回值 : 无
+ 140           *******************************************************************************************************/
+ 141          void mcu_init(void)
+ 142          {
+ 143   1        hal_rtc_start(false);
+ 144   1        hal_clklf_set_source(HAL_CLKLF_RCOSC32K);           // Use 32.768KHz的时钟源为内部RC     
+ 145   1      
+ 146   1        hal_rtc_set_compare_mode(HAL_RTC_COMPARE_MODE_0);   // Use 32 KHz timer mode 0
+ 147   1        set_timer_period(TAG_TIME);                         // Set the RTC2 time，card sleep time
+ 148   1        hal_clk_set_16m_source(HAL_CLK_XOSC16M);            // Always run on 16MHz crystal oscillator
+ 149   1        hal_clk_regret_xosc16m_on(0);                       // Keep XOSC16M off in register retention
+ 150   1      
+ 151   1        hal_rtc_start(true);              
+ 152   1        
+ 153   1        while((CLKLFCTRL&0x80)==0x80);                      // Wait for the 32kHz to startup (change phase)
+ 154   1        while((CLKLFCTRL&0x80)!=0x80); 
+ 155   1      }
+ 156          
+ 157          /*******************************************************************************************************
+ 158           * 描  述 : 组装数据
+ 159           * 入  参 : 无
+ 160           * 返回值 : 无
+ 161           *******************************************************************************************************/
+ 162          void Assemble_Data(void)
+ 163          {
+ 164   1        xdata uint8_t fcs = 0,i;
+ 165   1        
+ 166   1        
+ 167   1        TxPayload[0] = 0x1E;
+ 168   1        TxPayload[1] = TagInfo.id.id8[0];  //IDL
+ 169   1        TxPayload[2] = TagInfo.id.id8[1];  //IDH
+ 170   1        TxPayload[3] = TagInfo.CellVoltageH;
+ 171   1        TxPayload[4] = TagInfo.CellVoltageL;  
+ 172   1        for(i=0;i<(MAX_TX_PAYLOAD-1);i++)fcs += TxPayload[i];
+ 173   1      
+ 174   1        TxPayload[MAX_TX_PAYLOAD - 1] = (256 - fcs)%256;
+ 175   1      }
+ 176          
+C51 COMPILER V9.52.0.0   MAIN                                                              12/08/2014 15:15:33 PAGE 4   
+
+ 177          /*******************************************************************************************************
+ 178           * 描  述 : 主函数
+ 179           * 入  参 : 无
+ 180           * 返回值 : 无
+ 181           *******************************************************************************************************/ 
+ 182          void main()
+ 183          {   
+ 184   1        uint8_t RfReceLen;
+ 185   1        xdata   uint32_t  loopCount = ADC_TIME-1;
+ 186   1        
+ 187   1        TagInfo.id.id16 = TAG_ID;
+ 188   1          
+ 189   1        IoInit();  
+ 190   1        mcu_init(); 
+ 191   1      
+ 192   1        #ifdef DEBUG_UART
+                hal_uart_init(UART_BAUD_57K6);  //初始化UART，波特率57600
+                while(hal_clk_get_16m_source() != HAL_CLK_XOSC16M) //等待时钟稳定
+                  ;
+                #endif
+ 197   1        
+ 198   1        adc_init();
+ 199   1        RfCofig();
+ 200   1       
+ 201   1        #ifdef  USE_WDT
+ 202   1        hal_wdog_init(WDT_TIME);//配置看门狗超时时间2s，使能看门狗
+ 203   1        #endif
+ 204   1        
+ 205   1        while(1)
+ 206   1        { 
+ 207   2          loopCount++;
+ 208   2          
+ 209   2          #ifdef  USE_WDT
+ 210   2          hal_wdog_restart(); //喂狗
+ 211   2          #endif
+ 212   2          
+ 213   2          if(loopCount == ADC_TIME)    //启动后执行一次AD检测，以后，每2小时检测一次
+ 214   2          {
+ 215   3            hal_adc_start();           //启动ADC
+ 216   3            while( hal_adc_busy())     //等待ADC转换结束
+ 217   3              ;
+ 218   3            TagInfo.CellVoltageH = hal_adc_read_MSB(); //读取ADC采样值
+ 219   3            TagInfo.CellVoltageL = hal_adc_read_LSB();                     
+ 220   3            loopCount=0;
+ 221   3          }
+ 222   2          
+ 223   2          #ifdef DEBUG_LED
+ 224   2          D4 = ~D4;
+ 225   2          #endif
+ 226   2          
+ 227   2          PWRDWN = 0x04;    // 进入寄存器维持低功耗模式
+ 228   2          PWRDWN = 0x00;
+ 229   2      
+ 230   2          Assemble_Data();  // 数据打包
+ 231   2          hal_nrf_write_tx_payload(TxPayload,MAX_TX_PAYLOAD);     
+ 232   2      
+ 233   2          CE_PULSE();             //无线发射数据 
+ 234   2          radio_busy = true;    
+ 235   2          while(radio_busy)       //等待操作完成
+ 236   2            ;
+ 237   2        }                                           
+ 238   1      }
+C51 COMPILER V9.52.0.0   MAIN                                                              12/08/2014 15:15:33 PAGE 5   
+
+*** WARNING C280 IN LINE 184 OF main.c: 'RfReceLen': unreferenced local variable
+ 239          
+ 240          /*******************************************************************************************************
+ 241           * 描  述 : 无线中断服务函数
+ 242           * 入  参 : 无
+ 243           * 返回值 : 无
+ 244           *******************************************************************************************************/
+ 245          void rf_irq() interrupt INTERRUPT_RFIRQ
+ 246          {
+ 247   1        uint8_t  irq_flags;
+ 248   1         
+ 249   1        irq_flags = hal_nrf_get_clear_irq_flags(); //读取并清除无线中断标志
+ 250   1      
+ 251   1        if(irq_flags & (1<<HAL_NRF_RX_DR))  //接收到数据?
+ 252   1        {
+ 253   2        
+ 254   2          while(!hal_nrf_rx_fifo_empty())// Read payload
+ 255   2          {
+ 256   3            PipeAndLen = hal_nrf_read_rx_payload(RxPayload);//读取数据
+ 257   3          }
+ 258   2          radio_busy = false;
+ 259   2        }
+ 260   1      
+ 261   1        if(irq_flags & ((1<<HAL_NRF_TX_DS)))      // transimmter finish 
+ 262   1        {
+ 263   2          radio_busy = false;     
+ 264   2        }
+ 265   1      
+ 266   1        if(irq_flags & ((1<<HAL_NRF_MAX_RT)))     // re-transimmter
+ 267   1        {
+ 268   2          radio_busy = false;
+ 269   2          hal_nrf_flush_tx();
+ 270   2        }
+ 271   1      }
+ 272          /********************************************END FILE*****************************************************
+             -/      
+ 273                                    
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =    630    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =     69       6
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =      7       5
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  1 WARNING(S),  0 ERROR(S)
